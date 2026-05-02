@@ -38,6 +38,134 @@ GitJournal is a note taking app focused on privacy and data portability. It stor
 <img src="https://gitjournal.io/screenshots/android/2020-06-04/en-GB/images/phoneScreenshots/Nexus 6P-20.png" width="240" height="auto">
 </p>
 
+# Build Android APK
+
+The following commands build a debug `prod` Android APK for local testing. They
+were verified on Ubuntu 24.04 in GitHub Codespaces. The APK is intentionally a
+debug APK, so it does not require Play Store/release signing keys.
+
+Requirements:
+
+- Ubuntu/Debian amd64 environment
+- Network access for installing packages, Android SDK components, Flutter, and
+  Dart packages
+
+Copy and run from the repository root. The script reuses existing Flutter and
+Android SDK installations if available; otherwise it installs Flutter 3.41.5 into
+`$HOME/sdks/flutter` and Android command-line tools into `$HOME/Android/Sdk`.
+
+```bash
+set -euxo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+sudo apt-get update
+sudo apt-get install -y \
+  curl \
+  git \
+  openjdk-17-jdk \
+  unzip \
+  xz-utils
+
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export PATH="$JAVA_HOME/bin:$PATH"
+
+FLUTTER_VERSION=3.41.5
+FLUTTER_HOME="$HOME/sdks/flutter"
+
+if ! command -v flutter >/dev/null 2>&1; then
+  if [ ! -x "$FLUTTER_HOME/bin/flutter" ]; then
+    rm -rf "$FLUTTER_HOME"
+    git clone --depth 1 --branch "$FLUTTER_VERSION" \
+      https://github.com/flutter/flutter.git "$FLUTTER_HOME"
+  fi
+  export PATH="$FLUTTER_HOME/bin:$PATH"
+fi
+
+ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
+ANDROID_SDK_ROOT="$ANDROID_HOME"
+export ANDROID_HOME ANDROID_SDK_ROOT
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+
+if ! command -v sdkmanager >/dev/null 2>&1; then
+  rm -rf "$ANDROID_HOME/cmdline-tools"
+  mkdir -p "$ANDROID_HOME/cmdline-tools"
+  curl -fsSL \
+    https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip \
+    -o /tmp/android-commandlinetools.zip
+  unzip -q /tmp/android-commandlinetools.zip -d /tmp/android-commandlinetools
+  mv /tmp/android-commandlinetools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+fi
+
+sdkmanager --install \
+  "platform-tools" \
+  "platforms;android-36" \
+  "build-tools;36.0.0"
+yes | sdkmanager --licenses >/dev/null || true
+
+flutter --version
+flutter config --no-analytics
+flutter doctor -v
+
+# Generate the local environment file. If secrets/env.json is unavailable or
+# still encrypted, create the minimum local file required by error reporting.
+if [ -s secrets/env.json ]; then
+  dart ./scripts/setup_env.dart || true
+fi
+
+if ! grep -q 'sentry' lib/.env.dart 2>/dev/null; then
+  cat > lib/.env.dart <<'EOF'
+class Env {
+  static final String sentry = "";
+}
+EOF
+fi
+
+# The repository default Gradle heap is tuned for larger machines. Temporarily
+# reduce it so the APK can be built reliably on a small Codespaces/local VM.
+GRADLE_PROPS=android/gradle.properties
+GRADLE_PROPS_BACKUP="$(mktemp)"
+cp "$GRADLE_PROPS" "$GRADLE_PROPS_BACKUP"
+restore_gradle_props() {
+  cp "$GRADLE_PROPS_BACKUP" "$GRADLE_PROPS"
+}
+trap restore_gradle_props EXIT
+python3 - <<'PY'
+from pathlib import Path
+path = Path('android/gradle.properties')
+lines = path.read_text().splitlines()
+out = []
+replaced = False
+for line in lines:
+    if line.startswith('org.gradle.jvmargs='):
+        out.append('org.gradle.jvmargs=-Xmx2G -XX:MaxMetaspaceSize=1G -XX:ReservedCodeCacheSize=256m -XX:+HeapDumpOnOutOfMemoryError')
+        replaced = True
+    else:
+        out.append(line)
+if not replaced:
+    out.append('org.gradle.jvmargs=-Xmx2G -XX:MaxMetaspaceSize=1G -XX:ReservedCodeCacheSize=256m -XX:+HeapDumpOnOutOfMemoryError')
+path.write_text('\n'.join(out) + '\n')
+PY
+
+flutter pub get --suppress-analytics
+flutter build apk \
+  --debug \
+  --flavor prod \
+  --target-platform android-arm64 \
+  --dart-define=INSTALL_SOURCE=fdroid
+
+APK="build/app/outputs/flutter-apk/app-prod-debug.apk"
+OUT="$(pwd)/GitJournal-app-prod-debug.apk"
+cp "$APK" "$OUT"
+ls -lh "$OUT"
+sha256sum "$OUT"
+```
+
+The resulting APK will be written to the repository root:
+
+```text
+GitJournal-app-prod-debug.apk
+```
+
 # Build Linux amd64 .deb
 
 The following commands build a release Linux desktop bundle and package it as an
